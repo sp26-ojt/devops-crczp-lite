@@ -98,6 +98,20 @@ deploy_base_infrastructure() {
         retry tofu init -upgrade
     fi
 
+    # === CUSTOM FIX: Chỉ Curl file images.tf đã fix cứng IP về ===
+    log "Downloading custom images.tf..."
+    IMAGES_TF_PATH=".terraform/modules/images/images.tf"
+    CUSTOM_FILE_URL="http://192.168.121.1:8080/images.tf" # <-- Điền link của bạn vào đây
+
+    if [ -d ".terraform/modules/images" ]; then
+        rm -f "$IMAGES_TF_PATH"
+        curl -sSL "$CUSTOM_FILE_URL" -o "$IMAGES_TF_PATH"
+        log "Successfully replaced images.tf"
+    else
+        log_warning "Directory .terraform/modules/images not found. Custom fix skipped."
+    fi
+    # ==============================================================
+
     # Set Terraform variables
     export TF_VAR_external_network_name=public1
     export TF_VAR_dns_nameservers="[\"$DNS1\",\"$DNS2\"]"
@@ -131,14 +145,15 @@ deploy_base_infrastructure() {
 
     # Apply Terraform configuration
     log "Applying base infrastructure (this may take 15-30 minutes)..."
-    if ! retry tofu apply -auto-approve -var-file tfvars/vars-all.tfvars; then
+    
+    # === CUSTOM FIX 2: Ép chạy tuần tự để chống nghẽn I/O ===
+    if ! retry tofu apply -auto-approve -var-file tfvars/vars-all.tfvars -parallelism=1; then
         log_error "Base infrastructure deployment failed"
         return 1
     fi
 
     log_success "Base infrastructure deployment completed"
 }
-
 # Setup Kubernetes configuration
 setup_kubernetes_config() {
     log "Setting up Kubernetes configuration..."
@@ -170,7 +185,7 @@ wait_for_kubernetes() {
     wait_for_service "kubectl" "kubectl version --client"
 
     # Wait for Traefik CRD to be available (indicates k3s is fully ready)
-    wait_for_service "Traefik CRD" "kubectl get crd middlewares.traefik.io" 300 1
+    wait_for_service "Traefik CRD" "kubectl get crd middlewares.traefik.io" 9999 1
 
     log_success "Kubernetes cluster is ready"
 }
