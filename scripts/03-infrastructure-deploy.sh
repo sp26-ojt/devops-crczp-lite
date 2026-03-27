@@ -20,6 +20,17 @@ BASE_TF_PATH="$REPO_PATH/tf-openstack-base"
 HEAD_TF_PATH="$REPO_PATH/tf-head-services"
 VENV_PATH="/root/kolla-ansible-venv"
 
+# === CUSTOM: Docker images của bạn ===
+CUSTOM_FRONTEND_IMAGE="sp26ojt/frontend-platform"
+CUSTOM_FRONTEND_TAG="v6"
+
+CUSTOM_TRAINING_IMAGE="nnm311/kypo-training-service"
+CUSTOM_TRAINING_TAG="v26"
+
+CUSTOM_ADAPTIVE_TRAINING_IMAGE="nnm311/kypo-adaptive-training-service"
+CUSTOM_ADAPTIVE_TRAINING_TAG="v1"
+# ======================================
+
 # Setup application credentials
 setup_application_credentials() {
     log "Setting up OpenStack application credentials..."
@@ -98,6 +109,20 @@ deploy_base_infrastructure() {
         retry tofu init -upgrade
     fi
 
+    # === CUSTOM FIX: Chỉ Curl file images.tf đã fix cứng IP về ===
+    log "Downloading custom images.tf..."
+    IMAGES_TF_PATH=".terraform/modules/images/images.tf"
+    CUSTOM_FILE_URL="http://192.168.121.1:8080/images.tf" # <-- Điền link của bạn vào đây
+
+    if [ -d ".terraform/modules/images" ]; then
+        rm -f "$IMAGES_TF_PATH"
+        curl -sSL "$CUSTOM_FILE_URL" -o "$IMAGES_TF_PATH"
+        log "Successfully replaced images.tf"
+    else
+        log_warning "Directory .terraform/modules/images not found. Custom fix skipped."
+    fi
+    # ==============================================================
+
     # Set Terraform variables
     export TF_VAR_external_network_name=public1
     export TF_VAR_dns_nameservers="[\"$DNS1\",\"$DNS2\"]"
@@ -131,7 +156,9 @@ deploy_base_infrastructure() {
 
     # Apply Terraform configuration
     log "Applying base infrastructure (this may take 15-30 minutes)..."
-    if ! retry tofu apply -auto-approve -var-file tfvars/vars-all.tfvars; then
+
+    # === CUSTOM FIX 2: Ép chạy tuần tự để chống nghẽn I/O ===
+    if ! retry tofu apply -auto-approve -var-file tfvars/vars-all.tfvars -parallelism=1; then
         log_error "Base infrastructure deployment failed"
         return 1
     fi
@@ -170,7 +197,7 @@ wait_for_kubernetes() {
     wait_for_service "kubectl" "kubectl version --client"
 
     # Wait for Traefik CRD to be available (indicates k3s is fully ready)
-    wait_for_service "Traefik CRD" "kubectl get crd middlewares.traefik.io" 300 1
+    wait_for_service "Traefik CRD" "kubectl get crd middlewares.traefik.io" 9999 1
 
     log_success "Kubernetes cluster is ready"
 }
@@ -284,6 +311,38 @@ deploy_head_services() {
     else
         log_warning "values.yaml not found, continuing without DNS updates"
     fi
+
+    # === CUSTOM FIX: Override frontend, training, adaptive-training images ===
+    if [ -f values.yaml ]; then
+        if ! grep -q "CUSTOM_IMAGE_OVERRIDE" values.yaml; then
+            log "Appending custom image overrides to values.yaml..."
+            cat >> values.yaml << EOF
+
+# CUSTOM_IMAGE_OVERRIDE
+frontend:
+  image:
+    url: ${CUSTOM_FRONTEND_IMAGE}
+    tag: ${CUSTOM_FRONTEND_TAG}
+
+training:
+  image:
+    url: ${CUSTOM_TRAINING_IMAGE}
+    tag: ${CUSTOM_TRAINING_TAG}
+
+adaptive-training:
+  image:
+    url: ${CUSTOM_ADAPTIVE_TRAINING_IMAGE}
+    tag: ${CUSTOM_ADAPTIVE_TRAINING_TAG}
+EOF
+            log "Image overrides applied:"
+            log "  - frontend: ${CUSTOM_FRONTEND_IMAGE}:${CUSTOM_FRONTEND_TAG}"
+            log "  - training: ${CUSTOM_TRAINING_IMAGE}:${CUSTOM_TRAINING_TAG}"
+            log "  - adaptive-training: ${CUSTOM_ADAPTIVE_TRAINING_IMAGE}:${CUSTOM_ADAPTIVE_TRAINING_TAG}"
+        else
+            log "Custom image overrides already applied in values.yaml"
+        fi
+    fi
+    # =========================================================================
 
     # Check if Terraform is already initialized
     if [ ! -d ".terraform" ]; then
